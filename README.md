@@ -58,4 +58,3 @@ You can use this dataset to:
 - Dates are in the format `YYYY-MM-DD`.
 - Monetary values are stored in `close_value` (assumed in USD).
 - Deal stages include at least: `Won`, `Lost`.
-- 
