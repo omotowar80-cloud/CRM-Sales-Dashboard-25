@@ -1,1 +1,172 @@
-
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "60912fba",
+   "metadata": {},
+   "source": [
+    "# CRM Sales Dashboard Analysis\n",
+    "This notebook provides an overview of the sales data, including KPIs, visualizations, and insights."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ec187b15",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import pandas as pd\n",
+    "import matplotlib.pyplot as plt\n",
+    "\n",
+    "# Load dataset\n",
+    "df = pd.read_csv('processed/CRM_Sales_Dashboard_Merged_Enhanced.csv')\n",
+    "\n",
+    "# Preview\n",
+    "df.head()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ed478907",
+   "metadata": {},
+   "source": [
+    "## Key Metrics"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "14401399",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "summary = {}\n",
+    "summary['Total Deals'] = len(df)\n",
+    "summary['Won Deals'] = df['win_flag'].sum()\n",
+    "summary['Lost Deals'] = len(df) - df['win_flag'].sum()\n",
+    "summary['Win Rate (%)'] = round(df['win_flag'].mean() * 100, 2)\n",
+    "summary['Total Revenue'] = df['close_value'].sum()\n",
+    "summary['Avg Sales Cycle (days)'] = round(df['sales_cycle_days'].mean(skipna=True), 1)\n",
+    "summary"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "1e424e89",
+   "metadata": {},
+   "source": [
+    "## Visualizations"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "bbf8d5cd",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "region_sales = df.groupby(\"regional_office\")[\"close_value\"].sum()\n",
+    "region_sales.plot(kind=\"bar\", figsize=(6,4), title=\"Total Sales by Region\")\n",
+    "plt.ylabel(\"Sales Value (USD)\")\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "158be9fe",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "stage_counts = df['deal_stage'].value_counts()\n",
+    "stage_counts.plot(kind=\"pie\", autopct=\"%1.1f%%\", figsize=(5,5), title=\"Deal Stage Distribution\")\n",
+    "plt.ylabel(\"\")\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "92a76c0d",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "product_sales = df.groupby(\"product\")[\"close_value\"].sum().sort_values(ascending=False).head(10)\n",
+    "product_sales.plot(kind=\"bar\", figsize=(8,4), title=\"Top Products by Sales\")\n",
+    "plt.ylabel(\"Sales Value (USD)\")\n",
+    "plt.xticks(rotation=45, ha=\"right\")\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "d79cfe94",
+   "metadata": {},
+   "source": [
+    "## 🔮 Predictive Modeling: Win Probability\n",
+    "We will build a simple machine learning model to predict the probability of winning a deal based on features like sales agent, product, and region."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "0884a604",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from sklearn.model_selection import train_test_split\n",
+    "from sklearn.preprocessing import LabelEncoder\n",
+    "from sklearn.linear_model import LogisticRegression\n",
+    "from sklearn.metrics import classification_report, accuracy_score\n",
+    "\n",
+    "# Copy dataset\n",
+    "df_ml = df.copy()\n",
+    "\n",
+    "# Encode categorical variables\n",
+    "categorical_cols = ['sales_agent', 'manager', 'regional_office', 'product', 'account']\n",
+    "encoders = {}\n",
+    "for col in categorical_cols:\n",
+    "    le = LabelEncoder()\n",
+    "    df_ml[col] = le.fit_transform(df_ml[col].astype(str))\n",
+    "    encoders[col] = le\n",
+    "\n",
+    "# Features and target\n",
+    "X = df_ml[categorical_cols + ['close_value', 'sales_cycle_days']].fillna(0)\n",
+    "y = df_ml['win_flag']\n",
+    "\n",
+    "# Train/test split\n",
+    "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)\n",
+    "\n",
+    "# Train logistic regression\n",
+    "model = LogisticRegression(max_iter=1000)\n",
+    "model.fit(X_train, y_train)\n",
+    "\n",
+    "# Predictions\n",
+    "y_pred = model.predict(X_test)\n",
+    "y_prob = model.predict_proba(X_test)[:,1]\n",
+    "\n",
+    "print(\"Accuracy:\", accuracy_score(y_test, y_pred))\n",
+    "print(classification_report(y_test, y_pred))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "c1360e06",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Example: Predict win probability for first 5 test deals\n",
+    "predictions = pd.DataFrame({\n",
+    "    'Predicted_Win': y_pred[:5],\n",
+    "    'Win_Probability': y_prob[:5]\n",
+    "})\n",
+    "predictions"
+   ]
+  }
+ ],
+ "metadata": {},
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
