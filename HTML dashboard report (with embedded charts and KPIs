@@ -1,0 +1,511 @@
+"""
+CRM Data Pipeline (single-file)
+--------------------------------
+End-to-end pipeline that reads your CRM Excel workbook, exports raw CSVs,
+merges & enhances data, generates reports/visualizations, trains a simple
+predictive model, and produces a **self-contained HTML dashboard**.
+
+HARDENING & OPTIONAL DEPS
+-------------------------
+- Works in notebooks/sandboxes where `__file__` may be undefined.
+- **Optional**: Charts need `matplotlib`. If it's not installed, the pipeline
+  will **skip chart generation** and still complete.
+- **Optional**: Model training needs `scikit-learn`. If not installed, it's
+  skipped gracefully.
+
+Install (recommended):
+  pip install -U pandas matplotlib scikit-learn
+
+USAGE
+-----
+# Fast path: point to your uploaded workbook in /mnt/data
+python pipeline.py --excel "/mnt/data/Copy of CRM Sales Dashboard '25 (1).xlsx"
+
+# Optional: specify sheet names if you know them
+python pipeline.py --excel "data/raw/CRM_Sales_Dashboard_25.xlsx" \
+  --deals-sheet "Deals" --teams-sheet "sales_teams"
+
+# Run lightweight unit tests (no data processing)
+python pipeline.py --tests-only
+
+PROJECT LAYOUT (auto-created)
+-----------------------------
+<project_root>/
+  data/
+    raw/
+    processed/
+  reports/
+
+FEATURES
+--------
+- Robust `project_root()` (no `__file__` crash).
+- Auto-ingests Excel into `data/raw` (or uses provided path).
+- Smart sheet detection if names not provided.
+- Summary TXT, PNG charts (if matplotlib available), model report (if sklearn
+  available), and **HTML dashboard** with inline images.
+- Unit tests to catch regressions (no hard dependency on matplotlib).
+"""
+
+import argparse
+import base64
+from io import BytesIO
+import pandas as pd
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+
+# --- Optional imports (graceful degradation) ---------------------------------
+try:  # Charts
+    import matplotlib.pyplot as plt  # type: ignore
+    HAS_MPL = True
+except Exception:  # ModuleNotFoundError or backend issues
+    plt = None  # type: ignore
+    HAS_MPL = False
+
+try:  # Model
+    from sklearn.model_selection import train_test_split  # type: ignore
+    from sklearn.linear_model import LogisticRegression  # type: ignore
+    from sklearn.metrics import classification_report  # type: ignore
+    HAS_SKLEARN = True
+except Exception:
+    HAS_SKLEARN = False
+
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def project_root(start: Path | None = None) -> Path:
+    """Return the project root, handling environments where `__file__` is absent.
+
+    Logic:
+    - If a starting path is given, use it.
+    - Else if `__file__` exists, resolve to the script's directory.
+    - Else fall back to current working directory.
+    - If inside a `scripts/` folder, return its parent as project root.
+    """
+    here = start or (Path(__file__).resolve() if "__file__" in globals() else Path.cwd())
+    # If `here` points to a file, use its directory
+    if here.is_file():
+        here = here.parent
+    # If we're inside a scripts dir, project root is its parent
+    if here.name == "scripts":
+        return here.parent
+    return here
+
+
+def ensure_excel_available(src_excel: Path, raw_dir: Path, canonical_name: str = "CRM_Sales_Dashboard_25.xlsx") -> Path:
+    """Ensure the Excel file exists in data/raw. If missing, copy it.
+
+    Returns the path to the canonical Excel in data/raw.
+    """
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    dest = raw_dir / canonical_name
+    if not dest.exists():
+        if src_excel.exists():
+            shutil.copy(src_excel, dest)
+            print(f"[INFO] Copied Excel to {dest}")
+        else:
+            raise FileNotFoundError(f"Could not find source Excel at {src_excel}")
+    return dest
+
+
+def detect_sheet_names(xls: pd.ExcelFile) -> tuple[str, str]:
+    """Detect deals/opportunities and teams sheets by keywords; fallback to ends."""
+    print(f"[INFO] Available sheets: {xls.sheet_names}")
+
+    def find_sheet(keywords: list[str]) -> str | None:
+        for s in xls.sheet_names:
+            lname = s.lower()
+            if any(k in lname for k in keywords):
+                return s
+        return None
+
+    deals = find_sheet(["deal", "pipeline", "opportunit"]) or xls.sheet_names[0]
+    teams = find_sheet(["team", "sales"]) or (xls.sheet_names[-1] if len(xls.sheet_names) > 1 else xls.sheet_names[0])
+    print(f"[INFO] Using deals sheet: {deals}")
+    print(f"[INFO] Using teams sheet: {teams}")
+    return deals, teams
+
+# -----------------------------
+# Processing
+# -----------------------------
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Create soft-normalized column aliases to increase compatibility."""
+    rename_map: dict[str, str] = {}
+    for c in list(df.columns):
+        cl = c.lower().strip()
+        if cl in {"stage", "deal_stage"}:
+            rename_map[c] = "deal_stage"
+        if cl in {"amount", "close_value", "value"}:
+            rename_map[c] = "close_value"
+        if cl in {"salesrep", "sales_rep", "rep", "sales_agent"}:
+            rename_map[c] = "sales_agent"
+        if cl in {"region", "regional_office", "office"}:
+            rename_map[c] = "regional_office"
+        if cl in {"product", "sku", "item"}:
+            rename_map[c] = "product"
+        if cl in {"engage_date", "created", "created_date", "open_date"}:
+            rename_map[c] = "engage_date"
+        if cl in {"close_date", "closedate", "won_date"}:
+            rename_map[c] = "close_date"
+        if cl in {"closed", "won", "is_won"}:
+            rename_map[c] = "closed"
+        if cl in {"manager", "team_lead", "mgr"}:
+            rename_map[c] = "manager"
+    return df.rename(columns=rename_map)
+
+
+def process_and_merge(deals_df: pd.DataFrame, teams_df: pd.DataFrame) -> pd.DataFrame:
+    deals_df = normalize_columns(deals_df)
+    teams_df = normalize_columns(teams_df)
+
+    if "sales_agent" in deals_df.columns and "sales_agent" in teams_df.columns:
+        merged = deals_df.merge(teams_df.drop_duplicates("sales_agent"), on="sales_agent", how="left")
+    else:
+        print("[WARN] Could not merge on 'sales_agent' — saving deals only")
+        merged = deals_df.copy()
+
+    # Enhance fields
+    merged["deal_stage"] = merged.get("deal_stage", "").astype(str)
+    merged["closed"] = merged.get("closed")
+    if merged["closed"].dtype == object:
+        merged["closed"] = merged["closed"].astype(str).str.lower().isin(["true", "1", "won", "yes"]).astype(int)
+    merged["close_value"] = pd.to_numeric(merged.get("close_value"), errors="coerce").fillna(0.0)
+
+    merged["engage_date"] = pd.to_datetime(merged.get("engage_date"), errors="coerce")
+    merged["close_date"] = pd.to_datetime(merged.get("close_date"), errors="coerce")
+    merged["sales_cycle_days"] = (merged["close_date"] - merged["engage_date"]).dt.days
+
+    merged["win_flag"] = merged["deal_stage"].str.lower().eq("won").astype(int)
+    if "closed" in merged.columns:
+        merged.loc[merged["closed"].notna(), "win_flag"] = merged.loc[merged["closed"].notna(), "closed"].astype(int)
+
+    return merged
+
+
+def generate_summary(df: pd.DataFrame) -> dict:
+    total_rev = float(df["close_value"].sum()) if "close_value" in df.columns else 0.0
+    total_deals = int(len(df))
+    won_deals = int(df.get("win_flag", pd.Series([0] * len(df))).sum()) if total_deals else 0
+    win_rate = round((won_deals / total_deals) * 100, 2) if total_deals else 0.0
+    avg_deal = round(float(df["close_value"].mean()), 2) if "close_value" in df.columns and total_deals else 0.0
+    avg_cycle = round(float(df["sales_cycle_days"].mean()), 1) if "sales_cycle_days" in df.columns and df["sales_cycle_days"].notna().any() else 0.0
+
+    return {
+        "total_deals": total_deals,
+        "won_deals": won_deals,
+        "win_rate_pct": win_rate,
+        "total_revenue": round(total_rev, 2),
+        "avg_deal_size": avg_deal,
+        "avg_sales_cycle_days": avg_cycle,
+    }
+
+
+def save_summary_report(summary: dict, reports_dir: Path) -> Path:
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    out = reports_dir / "summary_report.txt"
+    with open(out, "w", encoding="utf-8") as f:
+        for k, v in summary.items():
+            f.write(f"{k}: {v}\n")
+    print(f"[INFO] Summary report saved to {out}")
+    return out
+
+
+# -----------------------------
+# Charting (optional)
+# -----------------------------
+
+def _save_fig(path: Path) -> None:
+    if not HAS_MPL:
+        return
+    assert plt is not None  # for type checkers
+    plt.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path)
+    plt.close()
+
+
+def generate_charts(df: pd.DataFrame, reports_dir: Path) -> list[Path]:
+    if not HAS_MPL:
+        print("[WARN] matplotlib not available — skipping chart generation.")
+        return []
+
+    assert plt is not None  # for type checkers
+    charts: list[Path] = []
+
+    # Revenue by Stage
+    if {"deal_stage", "close_value"}.issubset(df.columns):
+        plt.figure(figsize=(6, 4))
+        df.groupby("deal_stage")["close_value"].sum().plot(kind="bar")
+        plt.title("Revenue by Stage"); plt.ylabel("Revenue")
+        p = reports_dir / "revenue_by_stage.png"
+        _save_fig(p); charts.append(p)
+
+    # Top 10 Reps by Revenue
+    if {"sales_agent", "close_value"}.issubset(df.columns):
+        plt.figure(figsize=(8, 4))
+        df.groupby("sales_agent")["close_value"].sum().sort_values(ascending=False).head(10).plot(kind="bar")
+        plt.title("Top 10 Sales Reps by Revenue"); plt.ylabel("Revenue")
+        from math import radians  # stdlib; keeps lints happy
+        plt.xticks(rotation=45, ha="right")
+        p = reports_dir / "top_sales_reps.png"
+        _save_fig(p); charts.append(p)
+
+    # Revenue by Region
+    if {"regional_office", "close_value"}.issubset(df.columns):
+        plt.figure(figsize=(6, 4))
+        df.groupby("regional_office")["close_value"].sum().plot(kind="bar")
+        plt.title("Revenue by Region"); plt.ylabel("Revenue")
+        p = reports_dir / "revenue_by_region.png"
+        _save_fig(p); charts.append(p)
+
+    print(f"[INFO] Charts saved: {charts}")
+    return charts
+
+
+# -----------------------------
+# Model (optional)
+# -----------------------------
+
+def train_model(df: pd.DataFrame, reports_dir: Path) -> Path | None:
+    if not HAS_SKLEARN:
+        print("[WARN] scikit-learn not available — skipping model training.")
+        return None
+
+    if "win_flag" not in df.columns:
+        print("[WARN] 'win_flag' missing; skipping model training")
+        return None
+
+    X_cols = [c for c in ["close_value", "sales_cycle_days"] if c in df.columns]
+    if not X_cols:
+        print("[WARN] No numeric features; skipping model training")
+        return None
+
+    from sklearn.model_selection import train_test_split  # type: ignore
+    from sklearn.linear_model import LogisticRegression  # type: ignore
+    from sklearn.metrics import classification_report  # type: ignore
+
+    X = df[X_cols].fillna(0)
+    y = df["win_flag"].astype(int)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+
+    report_txt = classification_report(y_test, y_pred)
+    out = reports_dir / "model_report.txt"
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(report_txt)
+    print(f"[INFO] Model report saved to {out}")
+    return out
+
+# -----------------------------
+# HTML Dashboard
+# -----------------------------
+
+def _img_to_base64(path: Path) -> str:
+    if not path.exists():
+        return ""
+    with open(path, "rb") as fp:
+        b64 = base64.b64encode(fp.read()).decode("ascii")
+    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    return f"data:{mime};base64,{b64}"
+
+
+def generate_html_dashboard(summary: dict, charts: list[Path], processed_csv: Path, out_html: Path) -> Path:
+    charts_map = {p.stem: _img_to_base64(p) for p in charts}
+    kpi_html = "".join(
+        f"""
+        <div class='kpi'>
+            <div class='kpi-label'>{k.replace('_',' ').title()}</div>
+            <div class='kpi-value'>{v}</div>
+        </div>
+        """ for k, v in summary.items()
+    )
+
+    charts_html = "".join(
+        f"""
+        <div class='card'>
+            <h3>{name.replace('_',' ').title()}</h3>
+            <img src='{data_uri}' alt='{name}' />
+        </div>
+        """ for name, data_uri in charts_map.items() if data_uri
+    )
+
+    html = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'>
+  <title>CRM Sales Dashboard</title>
+  <style>
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }}
+    h1 {{ margin: 0 0 12px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }}
+    .kpi {{ background: #f7f7f8; border-radius: 14px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }}
+    .kpi-label {{ font-size: 12px; color: #555; }}
+    .kpi-value {{ font-size: 28px; font-weight: 700; }}
+    .card {{ background: #fff; border-radius: 14px; padding: 14px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }}
+    img {{ max-width: 100%; height: auto; display: block; }}
+    .footer {{ margin-top: 24px; font-size: 12px; color: #666; }}
+    a.button {{ display: inline-block; padding: 8px 12px; border-radius: 10px; background: #0b5fff; color: #fff; text-decoration: none; }}
+  </style>
+</head>
+<body>
+  <h1>CRM Sales Dashboard</h1>
+  <div class='grid'>{kpi_html}</div>
+  <h2 style='margin-top:24px;'>Charts</h2>
+  <div class='grid'>{charts_html or '<div>No charts generated.</div>'}</div>
+  <div class='footer'>
+    <p>Processed dataset: <code>{processed_csv}</code></p>
+  </div>
+</body>
+</html>
+"""
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+    out_html.write_text(html, encoding="utf-8")
+    print(f"[INFO] HTML dashboard saved to {out_html}")
+    return out_html
+
+# -----------------------------
+# Tests (unit only — no real data required)
+# -----------------------------
+
+# tiny 1×1 transparent PNG (base64) for environments without matplotlib
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+)
+
+
+def _write_tiny_png(path: Path) -> None:
+    path.write_bytes(base64.b64decode(_TINY_PNG_B64))
+
+
+def run_unit_tests() -> None:
+    print("\n▶ Running unit tests...")
+
+    # project_root
+    cwd = Path.cwd()
+    assert project_root(start=cwd / "scripts") == cwd
+    # If we pass a file path, project_root should use its parent
+    some_file = cwd / "somefile.py"
+    assert project_root(start=some_file) in {cwd, some_file.parent}
+
+    # Summary math is stable
+    df = pd.DataFrame({
+        "close_value": [100, 200, 0],
+        "win_flag": [1, 0, 1],
+        "sales_cycle_days": [10, 20, None],
+    })
+    s = generate_summary(df)
+    assert s["total_deals"] == 3
+    assert s["total_revenue"] == 300.0
+    assert s["won_deals"] == 2
+
+    # Charts function should not crash even if matplotlib is missing
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_p = Path(tmp)
+        charts = generate_charts(df, tmp_p)
+        assert isinstance(charts, list)
+        # If matplotlib present, some charts likely created
+        if HAS_MPL:
+            assert all(p.exists() for p in charts)
+        else:
+            assert charts == []
+
+    # HTML generator with dummy image (uses tiny PNG if mpl not available)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_p = Path(tmp)
+        img_path = tmp_p / "dummy.png"
+        if HAS_MPL:
+            assert plt is not None
+            plt.figure(); plt.plot([0, 1], [0, 1])
+            plt.savefig(img_path, format="png"); plt.close()
+        else:
+            _write_tiny_png(img_path)
+        html_path = tmp_p / "dash.html"
+        out = generate_html_dashboard({"total_deals": 1}, [img_path], tmp_p / "proc.csv", html_path)
+        assert out.exists() and out.read_text(encoding="utf-8") != ""
+
+    print("✅ Unit tests passed.")
+
+# -----------------------------
+# Main pipeline
+# -----------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CRM Data Pipeline with HTML Dashboard")
+    parser.add_argument("--excel", type=str, default=None, help="Path to Excel source file")
+    parser.add_argument("--deals-sheet", type=str, default=None, help="Name of deals sheet")
+    parser.add_argument("--teams-sheet", type=str, default=None, help="Name of sales team sheet")
+    parser.add_argument("--tests-only", action="store_true", help="Run unit tests only (no data processing)")
+    args = parser.parse_args()
+
+    if args.tests_only:
+        run_unit_tests()
+        print("\nℹ️ Tests-only mode: skipping data processing.")
+        return
+
+    root = project_root()
+    raw_dir = root / "data" / "raw"
+    processed_dir = root / "data" / "processed"
+    reports_dir = root / "reports"
+
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure Excel exists in raw (copy if needed)
+    if args.excel:
+        src_excel = Path(args.excel)
+    else:
+        # default location/name
+        src_excel = raw_dir / "CRM_Sales_Dashboard_25.xlsx"
+    excel_path = ensure_excel_available(src_excel, raw_dir)
+
+    # Open workbook and pick sheets (auto if not provided)
+    xls = pd.ExcelFile(excel_path)
+    deals_sheet, teams_sheet = args.deals_sheet, args.teams_sheet
+    if not deals_sheet or not teams_sheet:
+        auto_deals, auto_teams = detect_sheet_names(xls)
+        deals_sheet = deals_sheet or auto_deals
+        teams_sheet = teams_sheet or auto_teams
+
+    # Load data
+    deals_df = pd.read_excel(xls, sheet_name=deals_sheet)
+    teams_df = pd.read_excel(xls, sheet_name=teams_sheet)
+
+    print(f"[INFO] Deals shape: {deals_df.shape}")
+    print(f"[INFO] Teams shape: {teams_df.shape}")
+
+    # Process + merge
+    merged = process_and_merge(deals_df, teams_df)
+    processed_csv = processed_dir / "CRM_Sales_Dashboard_Merged_Enhanced.csv"
+    merged.to_csv(processed_csv, index=False)
+    print(f"[INFO] Processed data saved to {processed_csv}")
+
+    # Reports
+    summary = generate_summary(merged)
+    save_summary_report(summary, reports_dir)
+    charts = generate_charts(merged, reports_dir)
+    _ = train_model(merged, reports_dir)
+
+    # HTML dashboard
+    html_path = reports_dir / "CRM_Sales_Dashboard.html"
+    generate_html_dashboard(summary, charts, processed_csv, html_path)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)
+
+# run tests only (no data work)
+python pipeline.py --tests-only
+
+# full run (charts optional; install matplotlib if you want them)
+python pipeline.py --excel "/mnt/data/Copy of CRM Sales Dashboard '25 (1).xlsx"
