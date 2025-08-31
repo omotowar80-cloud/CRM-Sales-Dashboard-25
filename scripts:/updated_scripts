@@ -1,0 +1,126 @@
+run_scripts/
+  ├── 01_ingest.py        # just pulls in raw Excel → data/raw
+  ├── 02_preprocess.py    # cleans & merges → data/processed
+  ├── 03_train_model.py   # trains model, saves feature_importance.png
+  ├── 04_generate_reports.py  # builds text, charts, html
+  └── run_all.sh          # shell wrapper to run them sequentially
+
+#!/bin/bash
+set -e
+python run_scripts/01_ingest.py
+python run_scripts/02_preprocess.py
+python run_scripts/03_train_model.py
+python run_scripts/04_generate_reports.py
+
+run_scripts/
+ ├── run_pipeline.py   # Python entry point
+ └── run_pipeline.sh   # optional bash wrapper
+
+run_scripts/run_pipeline.py
+
+#!/usr/bin/env python3
+import subprocess
+import sys
+from pathlib import Path
+
+def main():
+    project_root = Path(__file__).resolve().parents[1]
+    pipeline = project_root / "pipeline.py"
+
+    if not pipeline.exists():
+        sys.exit("❌ pipeline.py not found in project root.")
+
+    cmd = [sys.executable, str(pipeline)] + sys.argv[1:]
+    print(f"▶️ Running pipeline: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+if __name__ == "__main__":
+    main()
+
+run_scripts/run_pipeline.sh
+
+#!/bin/bash
+set -e
+echo "▶️ Running CRM pipeline..."
+python3 "$(dirname "$0")/../pipeline.py" "$@"
+
+Now you can run your pipeline in two ways:
+
+# Python wrapper
+python run_scripts/run_pipeline.py --excel "data/raw/CRM_Sales_Dashboard_25.xlsx"
+
+# Or bash wrapper
+bash run_scripts/run_pipeline.sh --excel "data/raw/CRM_Sales_Dashboard_25.xlsx"
+
+Updated run_scripts/run_pipeline.py......
+
+#!/usr/bin/env python3
+import subprocess
+import sys
+from pathlib import Path
+
+STAGES = {
+    "ingest": "run_ingest",
+    "preprocess": "run_preprocess",
+    "train": "run_train_model",
+    "report": "run_generate_reports",
+    "all": "main"
+}
+
+def main():
+    project_root = Path(__file__).resolve().parents[1]
+    pipeline = project_root / "pipeline.py"
+
+    if not pipeline.exists():
+        sys.exit("❌ pipeline.py not found in project root.")
+
+    if len(sys.argv) < 2:
+        print("Usage: python run_scripts/run_pipeline.py [stage] [args...]")
+        print(f"Available stages: {', '.join(STAGES.keys())}")
+        sys.exit(1)
+
+    stage = sys.argv[1]
+    if stage not in STAGES:
+        sys.exit(f"❌ Unknown stage '{stage}'. Must be one of: {', '.join(STAGES.keys())}")
+
+    function_name = STAGES[stage]
+    cmd = [sys.executable, str(pipeline), "--stage", function_name] + sys.argv[2:]
+    print(f"▶️ Running pipeline stage: {stage} → {function_name}")
+    subprocess.run(cmd, check=True)
+
+if __name__ == "__main__":
+    main()
+
+Updated run_scripts/run_pipeline.sh.......
+
+#!/bin/bash
+set -e
+
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 [stage] [args...]"
+  echo "Available stages: ingest | preprocess | train | report | all"
+  exit 1
+fi
+
+STAGE=$1
+shift
+
+echo "▶️ Running CRM pipeline stage: $STAGE"
+python3 "$(dirname "$0")/../pipeline.py" --stage "$STAGE" "$@"
+
+Example Usage
+
+# Run everything
+python run_scripts/run_pipeline.py all
+
+# Just ingest raw Excel
+python run_scripts/run_pipeline.py ingest --excel data/raw/CRM_Sales_Dashboard_25.xlsx
+
+# Preprocess only
+python run_scripts/run_pipeline.py preprocess
+
+# Train ML model
+python run_scripts/run_pipeline.py train
+
+# Generate reports
+python run_scripts/run_pipeline.py report
