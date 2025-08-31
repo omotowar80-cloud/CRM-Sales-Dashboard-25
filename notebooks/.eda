@@ -1,1 +1,54 @@
 
+Install dependency
+pip install papermill
+
+run_scripts/run_notebooks.py
+
+#!/usr/bin/env python3
+import papermill as pm
+from pathlib import Path
+import datetime
+
+ROOT = Path(__file__).resolve().parents[1]
+NOTEBOOKS = ROOT / "notebooks" / "eda"
+REPORTS = ROOT / "reports"
+
+REPORTS.mkdir(exist_ok=True, parents=True)
+
+def run_eda():
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    input_nb = NOTEBOOKS / "eda.ipynb"
+    output_nb = REPORTS / f"eda_executed_{timestamp}.ipynb"
+    html_out = REPORTS / f"eda_executed_{timestamp}.html"
+
+    print(f"📓 Running EDA notebook: {input_nb}")
+    pm.execute_notebook(str(input_nb), str(output_nb))
+    print(f"✅ Executed notebook saved: {output_nb}")
+
+    # Export to HTML for easier sharing
+    import nbconvert
+    import nbformat
+
+    nb = nbformat.read(output_nb, as_version=4)
+    html_exporter = nbconvert.HTMLExporter()
+    (body, _) = html_exporter.from_notebook_node(nb)
+
+    with open(html_out, "w", encoding="utf-8") as f:
+        f.write(body)
+    print(f"✅ HTML report saved: {html_out}")
+
+if __name__ == "__main__":
+    run_eda()
+
+Usage
+# Run pipeline normally
+python pipeline.py --stage all
+
+# Then run EDA notebook automatically
+python run_scripts/run_notebooks.py
+
+extra --stage eda
+
+inside pipeline.py
+python pipeline.py --stage eda
+
