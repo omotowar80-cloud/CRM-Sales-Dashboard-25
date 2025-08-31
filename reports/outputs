@@ -1,1 +1,161 @@
+data/ → inputs (raw & processed)
 
+notebooks/ → experiments
+
+run_scripts/ → automation entrypoints
+
+reports/ → human-readable outputs (PDF, Excel summaries, dashboards, plots)
+
+output/ (sometimes called artifacts/) → machine artifacts (trained models, serialized objects, logs, intermediate files)
+
+project_root/
+├── data/
+│   ├── raw/
+│   └── processed/
+├── notebooks/
+├── run_scripts/
+├── reports/       # ✅ PDFs, charts, dashboards for stakeholders
+├── output/        # ✅ ML models, pickles, logs, temp files
+├── pipeline.py
+└── README.md
+
+Reports (PDF, plots, summary CSV/Excel) → reports/
+
+ML artifacts (models, logs, metrics) → output/
+
+Here’s the refactored pipeline skeleton:
+
+pipeline.py
+
+#!/usr/bin/env python3
+import argparse
+import pandas as pd
+import matplotlib.pyplot as plt
+import joblib
+from pathlib import Path
+
+# ------------------ Paths ------------------
+def project_root() -> Path:
+    """Find project root (fallback to cwd if __file__ undefined)."""
+    here = Path(__file__).resolve() if "__file__" in globals() else Path.cwd()
+    return here.parent
+
+ROOT = project_root()
+DATA_RAW = ROOT / "data" / "raw"
+DATA_PROCESSED = ROOT / "data" / "processed"
+REPORTS_DIR = ROOT / "reports"
+OUTPUT_DIR = ROOT / "output"
+
+for d in [DATA_PROCESSED, REPORTS_DIR, OUTPUT_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
+
+# ------------------ Pipeline stages ------------------
+def run_ingest(excel_path: Path = None) -> Path:
+    """Load raw Excel → save merged CSV in processed/."""
+    if excel_path is None:
+        excel_candidates = list(DATA_RAW.glob("*.xlsx"))
+        if not excel_candidates:
+            raise FileNotFoundError("No Excel found in data/raw/. Provide --excel.")
+        excel_path = excel_candidates[0]
+
+    print(f"📥 Ingesting {excel_path}")
+    df = pd.read_excel(excel_path, sheet_name=None)
+    merged = pd.concat(df.values(), ignore_index=True)
+    out_path = DATA_PROCESSED / "crm_merged.csv"
+    merged.to_csv(out_path, index=False)
+    print(f"✅ Saved processed CSV → {out_path}")
+    return out_path
+
+
+def run_preprocess(csv_path: Path = None) -> Path:
+    """Clean data → save clean CSV."""
+    if csv_path is None:
+        csv_candidates = list(DATA_PROCESSED.glob("crm_merged.csv"))
+        if not csv_candidates:
+            raise FileNotFoundError("No merged CSV in data/processed/. Run ingest first.")
+        csv_path = csv_candidates[0]
+
+    df = pd.read_csv(csv_path)
+    print("🧹 Preprocessing data...")
+    df = df.dropna(how="all")
+    df = df.fillna({"Sales": 0})
+    out_path = DATA_PROCESSED / "crm_clean.csv"
+    df.to_csv(out_path, index=False)
+    print(f"✅ Saved clean CSV → {out_path}")
+    return out_path
+
+
+def run_train_model(csv_path: Path = None) -> Path:
+    """Train a dummy ML model and save it to output/."""
+    if csv_path is None:
+        csv_candidates = list(DATA_PROCESSED.glob("crm_clean.csv"))
+        if not csv_candidates:
+            raise FileNotFoundError("No clean CSV in data/processed/. Run preprocess first.")
+        csv_path = csv_candidates[0]
+
+    df = pd.read_csv(csv_path)
+    X = df.drop(columns=["Sales"], errors="ignore").select_dtypes("number")
+    y = df["Sales"] if "Sales" in df else pd.Series([0] * len(df))
+
+    from sklearn.linear_model import LinearRegression
+    model = LinearRegression()
+    if not X.empty and not y.empty:
+        model.fit(X, y)
+
+    out_path = OUTPUT_DIR / "crm_sales_model.pkl"
+    joblib.dump(model, out_path)
+    print(f"🤖 Trained model saved → {out_path}")
+    return out_path
+
+
+def run_generate_reports(csv_path: Path = None) -> Path:
+    """Generate summary plots + Excel report into reports/."""
+    if csv_path is None:
+        csv_candidates = list(DATA_PROCESSED.glob("crm_clean.csv"))
+        if not csv_candidates:
+            raise FileNotFoundError("No clean CSV in data/processed/. Run preprocess first.")
+        csv_path = csv_candidates[0]
+
+    df = pd.read_csv(csv_path)
+    print("📊 Generating reports...")
+
+    # Example chart
+    plt.figure(figsize=(8, 5))
+    df.groupby("Region")["Sales"].sum().plot(kind="bar")
+    plt.title("Total Sales by Region")
+    chart_path = REPORTS_DIR / "sales_by_region.png"
+    plt.savefig(chart_path, bbox_inches="tight")
+    plt.close()
+
+    # Excel summary
+    summary_path = REPORTS_DIR / "crm_summary.xlsx"
+    with pd.ExcelWriter(summary_path) as writer:
+        df.describe().to_excel(writer, sheet_name="Summary")
+        df.groupby("Region")["Sales"].sum().to_excel(writer, sheet_name="Sales by Region")
+
+    print(f"✅ Reports saved → {chart_path}, {summary_path}")
+    return summary_path
+
+# ------------------ CLI ------------------
+def main():
+    parser = argparse.ArgumentParser(description="CRM Sales Pipeline")
+    parser.add_argument("--stage", choices=["ingest","preprocess","train","report","all"], default="all")
+    parser.add_argument("--excel", type=str, help="Path to source Excel file (optional)")
+    args = parser.parse_args()
+
+    excel = Path(args.excel) if args.excel else None
+
+    if args.stage in ("ingest", "all"):
+        merged = run_ingest(excel)
+
+    if args.stage in ("preprocess", "all"):
+        clean = run_preprocess()
+
+    if args.stage in ("train", "all"):
+        run_train_model()
+
+    if args.stage in ("report", "all"):
+        run_generate_reports()
+
+if __name__ == "__main__":
+    main()
