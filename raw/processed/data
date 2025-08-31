@@ -1,0 +1,19 @@
+raw/ → original datasets
+
+CRM_Sales_Dashboard_25.xlsx
+
+CRM Sales Dashboard(in).csv.csv
+
+Pivot Table 1.csv
+
+Detail2-Won-Q4.csv
+
+Detail1-Q4.csv
+
+sales_teams.csv
+
+processed/ → analysis-ready datasets
+
+CRM_Sales_Dashboard_Merged.csv
+
+CRM_Sales_Dashboard_Merged_Enhanced.csv
